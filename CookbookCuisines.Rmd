@@ -1,0 +1,406 @@
+---
+title: 'Cookbook Cuisines'
+author: "Austin Hsu"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  tidy.opts=list(width.cutoff=70), # this last bit auto-wraps code and comments so the don't run off the page, but you need to have formatR installed
+  tidy=TRUE
+)
+```
+
+```{r libraries, message = FALSE, error=FALSE, warning=FALSE, include = FALSE}
+library(cmu.textstat)
+library(tidyverse)
+library(quanteda)
+library(quanteda.textstats)
+library(udpipe)
+library(future.apply)
+```
+
+```{r}
+cookbook_files <- list.files("cookbook_corpus",
+                         full.names = T, pattern = "*.txt", recursive = T)
+
+cookbooks <- cookbook_files[str_detect(cookbook_files, "chin|ital|fran|swed")]
+
+cookbooks_txt <- readtext::readtext(cookbooks)
+cookbooks_split <- split(cookbooks_txt, seq(1, nrow(cookbooks_txt), by = 4))
+
+```
+
+```{r}
+cookbooks_corpus <- corpus(cookbooks_txt)
+knitr::kable(head(cookbooks_corpus %>% summary()), caption = "Summaries of Chinese, French, Italian and Swedish Cookbooks")
+```
+
+```{r}
+ncores <- 4L
+plan(multisession, workers = ncores)
+
+annotate_splits <- function(corpus_text) {
+  ud_model <- udpipe_load_model("english-ewt-ud-2.5-191206.udpipe")
+  x <- data.table::as.data.table(udpipe_annotate(ud_model, x = corpus_text$text,
+                                                 doc_id = corpus_text$doc_id))
+  return(x)
+}
+```
+
+```{r annotate}
+annotation <- future_lapply(cookbooks_split, annotate_splits, future.seed = T)
+```
+
+```{r to_tokens, warning=FALSE, message=FALSE}
+annotation <- data.table::rbindlist(annotation)
+
+annotation <- annotation %>%
+  select(doc_id, sentence_id, token_id, token, lemma, upos, xpos, head_token_id, dep_rel) %>%
+  rename(pos = upos, tag = xpos)
+
+annotation <- structure(annotation, class = c("spacyr_parsed", "data.frame"))
+
+cookbook_tkns <- as.tokens(annotation, include_pos = "tag", concatenator = "_")
+```
+
+```{r}
+doc_categories <- names(cookbook_tkns) %>%
+  data.frame(cookbook = . ) %>% mutate(cookbook = str_extract(cookbook, "^[a-z]+"))
+docvars(cookbook_tkns) <- doc_categories
+```
+
+```{r dfm}
+cookbook_dfm <- cookbook_tkns %>%
+  tokens_select("^.*[a-zA-Z0-9]+.*_[a-z]", selection = "keep", valuetype = "regex", case_insensitive = T) %>%
+  dfm()
+
+chin_dfm <- dfm_subset(cookbook_dfm, cookbook == "chin") %>%
+  dfm_trim(min_temfreq = 1)
+fran_dfm <- dfm_subset(cookbook_dfm, cookbook == "fran") %>%
+  dfm_trim(min_temfreq = 1)
+ital_dfm <- dfm_subset(cookbook_dfm, cookbook == "ital") %>%
+  dfm_trim(min_temfreq = 1)
+swed_dfm <- dfm_subset(cookbook_dfm, cookbook == "swed") %>%
+  dfm_trim(min_temfreq = 1)
+```
+
+```{r count_table}
+cb_corpus_comp <- ntoken(cookbook_dfm) %>%
+                  data.frame(Tokens = .) %>%
+                  rownames_to_column("Cookbook") %>%
+                  mutate(Cookbook = str_extract (Cookbook, "^[a-z]+")) %>%
+                  group_by(Cookbook) %>%
+                  summarize(Tokens = sum(Tokens)) %>%
+                  janitor::adorn_totals()
+
+kableExtra::kbl(cb_corpus_comp,
+                caption = "Corpus Composition with Chinese-Japanese, French, Italian and Swedish Cookbooks",
+            booktabs = T, linesep = "") %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+```
+
+```{r}
+
+cb_freq <- textstat_frequency(cookbook_dfm) %>%
+  data.frame(stringAsFactors = F) %>%
+  filter(str_detect(feature, '_nn'))
+
+knitr::kable(cb_freq[1:20,], caption = "Most Common Nouns Altogether")
+
+chin_freq <- textstat_frequency(chin_dfm) %>%
+  data.frame(stringAsFactors = F) %>%
+  filter(str_detect(feature, '_nn'))
+knitr::kable(chin_freq[1:20,], caption = "Most Common Nouns in the Chinese-Japanese Cookbook")
+
+fran_freq <- textstat_frequency(fran_dfm) %>%
+  data.frame(stringAsFactors = F) %>%
+  filter(str_detect(feature, '_nn'))
+knitr::kable(fran_freq[1:20,], caption = "Most Common Nouns in the French Cookbook")
+
+ital_freq <- textstat_frequency(ital_dfm) %>%
+  data.frame(stringAsFactors = F) %>%
+  filter(str_detect(feature, '_nn'))
+knitr::kable(ital_freq[1:20,], caption = "Most Common Nouns in the Italian Cookbook")
+
+swed_freq <- textstat_frequency(swed_dfm) %>%
+  data.frame(stringAsFactors = F) %>%
+  filter(str_detect(feature, '_nn'))
+knitr::kable(swed_freq[1:20,], caption = "Most Common Nouns in the Swedish Cookbook")
+
+```
+
+```{r keywords}
+ci_kt <- keyness_table(chin_dfm, ital_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+
+kableExtra::kbl(head(ci_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Chinese-Japanese versus Italian
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+cf_kt <- keyness_table(chin_dfm, fran_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+
+kableExtra::kbl(head(cf_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Chinese-Japanese versus French
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+cs_kt <- keyness_table(chin_dfm, swed_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+
+kableExtra::kbl(head(cs_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Chinese-Japanese versus Swedish
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+```
+
+```{r}
+ic_kt <- keyness_table(ital_dfm, chin_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(ic_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Italian vs Chinese-Japanese
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+if_kt <- keyness_table(ital_dfm, fran_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(if_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Italian versus French
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+is_kt <- keyness_table(ital_dfm, chin_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(is_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Italian versus Swedish
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+```
+
+
+```{r}
+fc_kt <- keyness_table(fran_dfm, chin_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(fc_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with French vs Chinese-Japanese
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+fi_kt <- keyness_table(fran_dfm, ital_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(fi_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with French versus Italian
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+fs_kt <- keyness_table(fran_dfm, swed_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(fs_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with French versus Swedish
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+```
+
+```{r}
+sc_kt <- keyness_table(swed_dfm, chin_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(sc_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Swedish vs Chinese-Japanese
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+sf_kt <- keyness_table(swed_dfm, fran_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(sf_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Swedish versus French
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+
+si_kt <- keyness_table(swed_dfm, ital_dfm) %>%
+  separate(col = Token, into = c("Token", "Tag"), sep = "_")
+kableExtra::kbl(head(si_kt %>% filter(Tag == c("nn", "nns")), n = 10),
+                caption = "Highest Keyness Tokens in Cookbooks, with Swedish versus Italian
+                          as the Target", booktabs = T, linesep = "",
+                digits = 2) %>%
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>%
+  kableExtra::kable_classic()
+```
+```{r}
+library(text2vec)
+library(tidyverse)
+library(wordVectors)
+library(factoextra)
+library(tsne)
+cook_txt <- list.files("cookbook_corpus", full.names = T) 
+
+cookbooks <- cookbook_files[str_detect(cook_txt, "chin|ital|fran|swed")]
+
+cookbooks_txt <- readtext::readtext(cookbooks)
+
+```
+
+```{r}
+cook_filtered <- cookbooks_txt %>% filter(doc_id == "fran.txt" | doc_id == "chin.txt" | doc_id == "ital.txt" | doc_id == "swed.txt")
+cook_filtered
+cook_tks <- itoken(cook_filtered$text, 
+                  preprocessor = tolower, 
+                  tokenizer = word_tokenizer, 
+                  ids = cook_filtered$doc_id, 
+                  progressbar = TRUE)
+
+##cook_tks <- itoken(cookbooks_txt$text, 
+#                  preprocessor = tolower, 
+#                  tokenizer = word_tokenizer,  
+#                  ids = cook_txt$doc_id, 
+#                  progressbar = TRUE)
+
+cook_vocab <- create_vocabulary(cook_tks)
+cook_vocab <- prune_vocabulary(cook_vocab, term_count_min = 2L)
+cook_vocab %>% head()
+vectorizer <- vocab_vectorizer(cook_vocab)
+tcm <- create_tcm(cook_tks, vectorizer, skip_grams_window = 5L)
+glove <- GlobalVectors$new(rank = 50, x_max = 10)
+```
+
+```{r}
+cook_main <- glove$fit_transform(tcm, n_iter = 30, convergence_tol = 0.001)
+cook_context <- glove$components
+cook_vectors <-  cook_main + t(cook_context)
+```
+
+```{r}
+fishy <- cook_vectors["fish", , drop = FALSE]
+fishy <- sim2(x = cook_vectors, y = fishy, method = "cosine", norm = "l2")
+head(sort(fishy[,1], decreasing = TRUE), 5)
+
+cook_vectors <- as.matrix(cook_main + t(cook_context)) %>%
+  as.VectorSpaceModel()
+
+model <- as.matrix(cook_main + t(cook_context)) %>%
+  as.VectorSpaceModel()
+```
+
+```{r}
+cook_vectors %>% closest_to("fish", 20)
+cook_vectors %>% closest_to("meat", 20)
+cook_vectors %>% closest_to("green", 20)
+cook_vectors %>% closest_to("fruit", 20)
+```
+```{r}
+fish_neighbors <- model %>% closest_to("fish", 25)
+fishy <- model[[fish_neighbors$word, average=F]]
+prcomp(fishy@.Data) %>% fviz_pca_ind()
+
+model %>% 
+  closest_to(model[[c("fish","salmon","trout","shad","flounder","carp","roe","eels")]],10) %>%
+  as_tibble()
+
+```
+```{r}
+meat_neighbors <- model %>% closest_to("meat", 25)
+meaty <- model[[meat_neighbors$word, average=F]]
+prcomp(meaty@.Data) %>% fviz_pca_ind()
+
+model %>% 
+  closest_to(model[[c("beef","fish","fat","chicken","veal","gravy")]],10) %>%
+  as_tibble()
+
+```
+```{r}
+green_neighbors <- model %>% closest_to("green", 25)
+greeny <- model[[green_neighbors$word, average=F]]
+prcomp(greeny@.Data) %>% fviz_pca_ind()
+
+green_neighbors
+
+model %>% 
+  closest_to(model[[c("radish","leaves","cucumbers","beans","onions")]],10) %>%
+  as_tibble()
+```
+
+```{r}
+fruit_neighbors <- model %>% closest_to("fruit", 25)
+fruity <- model[[fruit_neighbors$word, average=F]]
+prcomp(fruity@.Data) %>% fviz_pca_ind()
+
+fruit_neighbors
+
+model %>% 
+  closest_to(model[[c("plums","damsons","marmalade","preserves","cherries")]],10) %>%
+  as_tibble()
+```
+```{r}
+dairy_neighbors <- model %>% closest_to("dairy", 25)
+dairy <- model[[dairy_neighbors$word, average=F]]
+prcomp(dairy@.Data) %>% fviz_pca_ind()
+
+dairy_neighbors
+
+model %>% 
+  closest_to(model[[c("beef","fish","fat","chicken","veal","gravy")]],10) %>%
+  as_tibble()
+```
+
+```{r}
+tastes <- model[[c("butter","water"), average=F]]
+butter_and_water <- model[1:3000,] %>% cosineSimilarity(tastes)
+butter_and_water <- butter_and_water[
+   rank(-butter_and_water[,1]) < 20 |
+   rank(-butter_and_water[,2]) < 20,] %>% data.frame()
+ggplot(butter_and_water, aes(x = butter, y = water)) +
+  geom_text(label = rownames(butter_and_water)) +
+  theme_classic()
+
+
+tastes <- model[[c("sugar","salt"), average=F]]
+sweet_and_saltiness <- model[1:3000,] %>% cosineSimilarity(tastes)
+sweet_and_saltiness <- sweet_and_saltiness[
+   rank(-sweet_and_saltiness[,1]) < 20 |
+   rank(-sweet_and_saltiness[,2]) < 20,] %>% data.frame()
+ggplot(sweet_and_saltiness, aes(x = salt, y = sugar)) +
+  geom_text(label = rownames(sweet_and_saltiness)) +
+  theme_classic()
+
+```
+
+```{r}
+tastes <- model[[c("sweet","salty","savory","bitter","sour"), average=F]]
+common_similarities_tastes <- model[1:3000,] %>% cosineSimilarity(tastes)
+
+high_similarities_to_tastes <- common_similarities_tastes[rank(-apply(common_similarities_tastes,1, max)) < 75,]
+
+high_similarities_to_tastes %>% prcomp %>% fviz_pca_biplot()
+```
